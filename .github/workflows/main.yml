@@ -1,0 +1,9 @@
+- name: Test Grafana Cloud
+        run: |
+          NOW=$(date +%s)
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer 3609143:${{ secrets.GRAFANA_CLOUD_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${{ secrets.GRAFANA_GRAPHITE_URL }}" \
+            -d "[{\"name\":\"jmeter.github_test\",\"interval\":10,\"value\":1,\"time\":$NOW}]"
