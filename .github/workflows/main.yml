@@ -1,9 +1,1099 @@
-- name: Test Grafana Cloud
-        run: |
-          NOW=$(date +%s)
+name: JMeter Load Test
 
-          curl -sS -X POST \
-            -H "Authorization: Bearer 3609143:${{ secrets.GRAFANA_CLOUD_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            "${{ secrets.GRAFANA_GRAPHITE_URL }}" \
-            -d "[{\"name\":\"jmeter.github_test\",\"interval\":10,\"value\":1,\"time\":$NOW}]"
+on:
+  workflow_dispatch:
+
+jobs:
+  jmeter-test:
+    runs-on: ubuntu-latest
+
+    steps:
+	   # ==========================================================
+      # 1. Grafana live dashboard
+      # ==========================================================
+      - name: Grafana live dashboard
+        run:echo "grafana dashboard:https://gracefulwillow1732.grafana.net/d/shzmhd2/launch-resp-time?from=now-15m&to=now&timezone=browser&refresh=auto"
+
+      # ==========================================================
+      # 1. Checkout repository
+      # ==========================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ==========================================================
+      # 2. Setup Java 17
+      # ==========================================================
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+
+      # ==========================================================
+      # 3. Download JMeter 5.6.3
+      # ==========================================================
+      - name: Download JMeter 5.6.3
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Downloading Apache JMeter 5.6.3"
+          echo "========================================"
+
+          wget -q \
+            https://dlcdn.apache.org/jmeter/binaries/apache-jmeter-5.6.3.tgz
+
+          echo "Extracting JMeter..."
+
+          tar -xzf apache-jmeter-5.6.3.tgz
+
+          echo "Checking JMeter version..."
+
+          ./apache-jmeter-5.6.3/bin/jmeter --version
+
+
+      # ==========================================================
+      # 4. Install JMeter Plugins Manager
+      # ==========================================================
+      - name: Install JMeter Plugins Manager
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Installing JMeter Plugins Manager"
+          echo "========================================"
+
+          wget -q \
+            https://repo1.maven.org/maven2/kg/apc/cmdrunner/2.3/cmdrunner-2.3.jar \
+            -O apache-jmeter-5.6.3/lib/cmdrunner-2.3.jar
+
+          wget -q \
+            https://jmeter-plugins.org/get/ \
+            -O apache-jmeter-5.6.3/lib/ext/jmeter-plugins-manager.jar
+
+          echo "Creating PluginsManagerCMD launcher..."
+
+          java \
+            -cp "apache-jmeter-5.6.3/lib/ext/jmeter-plugins-manager.jar" \
+            org.jmeterplugins.repository.PluginManagerCMDInstaller
+
+          echo "Checking PluginsManagerCMD launcher..."
+
+          test -f apache-jmeter-5.6.3/bin/PluginsManagerCMD.sh
+
+          echo "Plugins Manager installed successfully."
+
+
+      # ==========================================================
+      # 5. Install Ultimate Thread Group
+      # ==========================================================
+      - name: Install Ultimate Thread Group
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Installing Ultimate Thread Group"
+          echo "========================================"
+
+          apache-jmeter-5.6.3/bin/PluginsManagerCMD.sh \
+            install jpgc-casutg
+
+          echo "Ultimate Thread Group installed."
+
+
+      # ==========================================================
+      # 6. Verify JMX file
+      # ==========================================================
+      - name: Verify JMX file
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Checking JMX file"
+          echo "========================================"
+
+          test -f "View Results Tree.jmx"
+
+          ls -lh "View Results Tree.jmx"
+
+          echo "JMX file found successfully."
+
+
+      # ==========================================================
+      # 7. Create Graphite -> Grafana Cloud bridge
+      # ==========================================================
+      - name: Create Grafana live bridge
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Creating Graphite -> Grafana bridge"
+          echo "========================================"
+
+          cat > GraphiteGrafanaBridge.java <<'JAVA'
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.net.InetAddress;
+          import java.net.ServerSocket;
+          import java.net.Socket;
+          import java.net.URI;
+          import java.net.http.HttpClient;
+          import java.net.http.HttpRequest;
+          import java.net.http.HttpResponse;
+          import java.nio.charset.StandardCharsets;
+          import java.time.Duration;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.List;
+          import java.util.concurrent.atomic.AtomicBoolean;
+
+          public class GraphiteGrafanaBridge {
+
+              private static final int PORT = 2003;
+              private static final int BATCH_SIZE = 100;
+              private static final long FLUSH_INTERVAL_MS = 2000;
+
+              private static final List<Metric> queue =
+                  Collections.synchronizedList(
+                      new ArrayList<>()
+                  );
+
+              private static final AtomicBoolean running =
+                  new AtomicBoolean(true);
+
+              private static HttpClient httpClient;
+              private static String grafanaUrl;
+              private static String grafanaToken;
+
+              static class Metric {
+
+                  String name;
+                  double value;
+                  long time;
+
+                  Metric(
+                      String name,
+                      double value,
+                      long time
+                  ) {
+                      this.name = name;
+                      this.value = value;
+                      this.time = time;
+                  }
+              }
+
+              public static void main(String[] args)
+                  throws Exception {
+
+                  grafanaUrl =
+                      System.getenv("GRAFANA_URL");
+
+                  grafanaToken =
+                      System.getenv("GRAFANA_TOKEN");
+
+                  if (
+                      grafanaUrl == null ||
+                      grafanaUrl.isBlank()
+                  ) {
+                      throw new RuntimeException(
+                          "GRAFANA_URL environment variable is missing"
+                      );
+                  }
+
+                  if (
+                      grafanaToken == null ||
+                      grafanaToken.isBlank()
+                  ) {
+                      throw new RuntimeException(
+                          "GRAFANA_TOKEN environment variable is missing"
+                      );
+                  }
+
+                  httpClient =
+                      HttpClient.newBuilder()
+                          .connectTimeout(
+                              Duration.ofSeconds(10)
+                          )
+                          .build();
+
+                  Thread sender =
+                      new Thread(
+                          GraphiteGrafanaBridge::flushLoop
+                      );
+
+                  sender.setDaemon(true);
+                  sender.start();
+
+                  Runtime.getRuntime().addShutdownHook(
+                      new Thread(() -> {
+
+                          running.set(false);
+
+                          try {
+                              flush();
+                          } catch (Exception e) {
+                              System.err.println(
+                                  "Final flush failed: "
+                                      + e.getMessage()
+                              );
+                          }
+                      })
+                  );
+
+                  try (
+                      ServerSocket serverSocket =
+                          new ServerSocket(
+                              PORT,
+                              50,
+                              InetAddress.getByName(
+                                  "127.0.0.1"
+                              )
+                          )
+                  ) {
+
+                      serverSocket.setReuseAddress(true);
+
+                      System.out.println(
+                          "========================================"
+                      );
+
+                      System.out.println(
+                          "Graphite -> Grafana bridge started"
+                      );
+
+                      System.out.println(
+                          "Listening on 127.0.0.1:" + PORT
+                      );
+
+                      System.out.println(
+                          "========================================"
+                      );
+
+                      while (running.get()) {
+
+                          Socket socket =
+                              serverSocket.accept();
+
+                          Thread client =
+                              new Thread(
+                                  () ->
+                                      handleClient(socket)
+                              );
+
+                          client.setDaemon(true);
+                          client.start();
+                      }
+                  }
+              }
+
+              private static void handleClient(
+                  Socket socket
+              ) {
+
+                  try (
+                      Socket s = socket;
+
+                      BufferedReader reader =
+                          new BufferedReader(
+                              new InputStreamReader(
+                                  s.getInputStream(),
+                                  StandardCharsets.UTF_8
+                              )
+                          )
+                  ) {
+
+                      String line;
+
+                      while (
+                          running.get() &&
+                          (line = reader.readLine()) != null
+                      ) {
+
+                          line = line.trim();
+
+                          if (line.isEmpty()) {
+                              continue;
+                          }
+
+                          parseMetric(line);
+                      }
+
+                  } catch (Exception e) {
+
+                      if (running.get()) {
+
+                          System.err.println(
+                              "Graphite client error: "
+                                  + e.getMessage()
+                          );
+                      }
+                  }
+              }
+
+              private static void parseMetric(
+                  String line
+              ) {
+
+                  try {
+
+                      String[] parts =
+                          line.split("\\s+");
+
+                      if (parts.length < 3) {
+
+                          System.err.println(
+                              "Invalid Graphite line: "
+                                  + line
+                          );
+
+                          return;
+                      }
+
+                      String name =
+                          parts[0];
+
+                      double value =
+                          Double.parseDouble(
+                              parts[1]
+                          );
+
+                      long timestamp =
+                          Long.parseLong(
+                              parts[2]
+                          );
+
+                      Metric metric =
+                          new Metric(
+                              name,
+                              value,
+                              timestamp
+                          );
+
+                      boolean flushNow = false;
+
+                      synchronized (queue) {
+
+                          queue.add(metric);
+
+                          if (
+                              queue.size() >= BATCH_SIZE
+                          ) {
+                              flushNow = true;
+                          }
+                      }
+
+                      if (flushNow) {
+                          flush();
+                      }
+
+                  } catch (Exception e) {
+
+                      System.err.println(
+                          "Could not parse Graphite line: "
+                              + line
+                      );
+
+                      System.err.println(
+                          "Reason: "
+                              + e.getMessage()
+                      );
+                  }
+              }
+
+              private static void flushLoop() {
+
+                  while (running.get()) {
+
+                      try {
+
+                          Thread.sleep(
+                              FLUSH_INTERVAL_MS
+                          );
+
+                          flush();
+
+                      } catch (
+                          InterruptedException e
+                      ) {
+
+                          Thread.currentThread()
+                              .interrupt();
+
+                          break;
+
+                      } catch (Exception e) {
+
+                          System.err.println(
+                              "Flush loop error: "
+                                  + e.getMessage()
+                          );
+                      }
+                  }
+              }
+
+              private static void flush()
+                  throws Exception {
+
+                  List<Metric> batch;
+
+                  synchronized (queue) {
+
+                      if (queue.isEmpty()) {
+                          return;
+                      }
+
+                      batch =
+                          new ArrayList<>(queue);
+
+                      queue.clear();
+                  }
+
+                  StringBuilder json =
+                      new StringBuilder();
+
+                  json.append("[");
+
+                  for (
+                      int i = 0;
+                      i < batch.size();
+                      i++
+                  ) {
+
+                      Metric metric =
+                          batch.get(i);
+
+                      if (i > 0) {
+                          json.append(",");
+                      }
+
+                      json.append("{");
+
+                      json.append("\"name\":\"");
+                      json.append(
+                          escapeJson(metric.name)
+                      );
+                      json.append("\",");
+
+                      json.append("\"interval\":10,");
+
+                      json.append("\"value\":");
+                      json.append(
+                          Double.toString(
+                              metric.value
+                          )
+                      );
+
+                      json.append(",");
+
+                      json.append("\"time\":");
+                      json.append(
+                          Long.toString(
+                              metric.time
+                          )
+                      );
+
+                      json.append("}");
+                  }
+
+                  json.append("]");
+
+                  HttpRequest request =
+                      HttpRequest.newBuilder()
+                          .uri(
+                              URI.create(
+                                  grafanaUrl
+                              )
+                          )
+                          .timeout(
+                              Duration.ofSeconds(30)
+                          )
+                          .header(
+                              "Authorization",
+                              "Bearer 3609143:"
+                                  + grafanaToken
+                          )
+                          .header(
+                              "Content-Type",
+                              "application/json"
+                          )
+                          .POST(
+                              HttpRequest
+                                  .BodyPublishers
+                                  .ofString(
+                                      json.toString()
+                                  )
+                          )
+                          .build();
+
+                  try {
+
+                      HttpResponse<String> response =
+                          httpClient.send(
+                              request,
+                              HttpResponse
+                                  .BodyHandlers
+                                  .ofString()
+                          );
+
+                      int status =
+                          response.statusCode();
+
+                      if (
+                          status < 200 ||
+                          status >= 300
+                      ) {
+
+                          System.err.println(
+                              "Grafana HTTP "
+                                  + status
+                                  + ": "
+                                  + response.body()
+                          );
+
+                          synchronized (queue) {
+                              queue.addAll(batch);
+                          }
+
+                          return;
+                      }
+
+                      System.out.println(
+                          "Grafana live metrics sent: "
+                              + batch.size()
+                              + " | HTTP "
+                              + status
+                      );
+
+                  } catch (Exception e) {
+
+                      System.err.println(
+                          "Grafana send failed: "
+                              + e.getMessage()
+                      );
+
+                      synchronized (queue) {
+                          queue.addAll(batch);
+                      }
+                  }
+              }
+
+              private static String escapeJson(
+                  String value
+              ) {
+
+                  return value
+                      .replace(
+                          "\\",
+                          "\\\\"
+                      )
+                      .replace(
+                          "\"",
+                          "\\\""
+                      );
+              }
+          }
+          JAVA
+
+          echo "Compiling bridge..."
+
+          javac GraphiteGrafanaBridge.java
+
+          test -f GraphiteGrafanaBridge.class
+
+          echo "Bridge compiled successfully."
+
+
+      # ==========================================================
+      # 8. Start live Grafana bridge
+      # ==========================================================
+      - name: Start live Grafana bridge
+        env:
+          GRAFANA_URL: ${{ secrets.GRAFANA_GRAPHITE_URL }}
+          GRAFANA_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Starting live Grafana bridge"
+          echo "========================================"
+
+          nohup java \
+            GraphiteGrafanaBridge \
+            > graphite-bridge.log 2>&1 &
+
+          BRIDGE_PID=$!
+
+          echo "$BRIDGE_PID" > bridge.pid
+
+          echo "Bridge PID: $BRIDGE_PID"
+
+          sleep 3
+
+          echo "========================================"
+          echo "Bridge startup log"
+          echo "========================================"
+
+          cat graphite-bridge.log
+		  
+
+
+
+      # ==========================================================
+      # 9. Verify bridge port
+      # ==========================================================
+      - name: Verify Graphite bridge
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Checking Graphite port 2003"
+          echo "========================================"
+
+          if ! (echo > /dev/tcp/127.0.0.1/2003) 2>/dev/null; then
+
+            echo "ERROR: Graphite bridge is not listening."
+
+            echo "========================================"
+            echo "Bridge log"
+            echo "========================================"
+
+            cat graphite-bridge.log || true
+
+            exit 1
+          fi
+
+          echo "Graphite bridge is listening on port 2003."
+
+
+      # ==========================================================
+      # 10. Run JMeter
+      # ==========================================================
+      - name: Run JMeter 5.6.3
+        env:
+          JAVA_OPTS: "-Xms1g -Xmx2g"
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Starting JMeter test"
+          echo "========================================"
+
+          ./apache-jmeter-5.6.3/bin/jmeter \
+            -n \
+            -t "View Results Tree.jmx" \
+            -l results.jtl \
+            -Jjmeter.save.saveservice.output_format=csv \
+            -Jjmeter.save.saveservice.print_field_names=true \
+            -Jjmeter.save.saveservice.timestamp_format=ms \
+            -e \
+            -o jmeter-report
+
+          echo "========================================"
+          echo "JMeter test completed"
+          echo "========================================"
+
+          test -f results.jtl
+
+          ls -lh results.jtl
+
+          echo "========================================"
+          echo "First 5 lines of results.jtl"
+          echo "========================================"
+
+          head -n 5 results.jtl
+
+
+      # ==========================================================
+      # 11. Stop live bridge
+      # ==========================================================
+      - name: Stop live Grafana bridge
+        if: always()
+        run: |
+          echo "========================================"
+          echo "Stopping Grafana bridge"
+          echo "========================================"
+
+          if [ -f bridge.pid ]; then
+            kill "$(cat bridge.pid)" 2>/dev/null || true
+          fi
+
+          sleep 2
+
+          echo "========================================"
+          echo "Graphite bridge log"
+          echo "========================================"
+
+          cat graphite-bridge.log || true
+
+
+      # ==========================================================
+      # 12. Send completed JMeter results to Grafana Cloud
+      # ==========================================================
+      - name: Send JMeter results to Grafana Cloud
+        if: success()
+        env:
+          GRAFANA_URL: ${{ secrets.GRAFANA_GRAPHITE_URL }}
+          GRAFANA_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "Sending completed JMeter results"
+          echo "to Grafana Cloud"
+          echo "========================================"
+
+          python3 <<'PY'
+          import os
+          import csv
+          import json
+          import urllib.request
+          import urllib.error
+
+          GRAFANA_URL = os.environ["GRAFANA_URL"]
+          GRAFANA_TOKEN = os.environ["GRAFANA_TOKEN"]
+
+          print("Reading results.jtl...")
+
+          metrics = []
+          sample_count = 0
+
+          # ======================================================
+          # Read JMeter CSV JTL
+          # ======================================================
+
+          try:
+
+              with open(
+                  "results.jtl",
+                  "r",
+                  encoding="utf-8-sig",
+                  newline=""
+              ) as file:
+
+                  reader = csv.DictReader(file)
+
+                  print("----------------------------------------")
+                  print("JTL columns detected:")
+                  print(reader.fieldnames)
+                  print("----------------------------------------")
+
+                  if not reader.fieldnames:
+                      print("ERROR: JTL file has no header.")
+                      raise SystemExit(1)
+
+                  required_columns = [
+                      "timeStamp",
+                      "elapsed",
+                      "label",
+                      "success"
+                  ]
+
+                  missing_columns = [
+                      column
+                      for column in required_columns
+                      if column not in reader.fieldnames
+                  ]
+
+                  if missing_columns:
+
+                      print(
+                          "ERROR: Missing required JTL columns: "
+                          f"{missing_columns}"
+                      )
+
+                      raise SystemExit(1)
+
+                  # ==================================================
+                  # Process samples
+                  # ==================================================
+
+                  for row in reader:
+
+                      timestamp = row.get("timeStamp")
+                      elapsed = row.get("elapsed", "0")
+                      label = row.get("label", "unknown")
+                      success = row.get("success", "false")
+                      latency = row.get("Latency", "0")
+                      connect = row.get("Connect", "0")
+
+                      if not timestamp:
+                          continue
+
+                      sample_count += 1
+
+                      timestamp_seconds = int(timestamp) // 1000
+
+                      # ==================================================
+                      # Graphite-safe label
+                      # ==================================================
+
+                      safe_label = "".join(
+                          c
+                          if c.isalnum() or c in "_.-"
+                          else "_"
+                          for c in label
+                      )
+
+                      if not safe_label:
+                          safe_label = "unknown"
+
+                      success_value = (
+                          1
+                          if str(success).lower() == "true"
+                          else 0
+                      )
+
+                      print(
+                          f"Processing sample {sample_count}: "
+                          f"{safe_label} | "
+                          f"timestamp={timestamp_seconds} | "
+                          f"elapsed={elapsed}ms | "
+                          f"success={success}"
+                      )
+
+                      # ==================================================
+                      # Response time
+                      # ==================================================
+
+                      metrics.append({
+                          "name":
+                              f"jmeter.{safe_label}.response_time",
+                          "interval": 1,
+                          "value": float(elapsed or 0),
+                          "time": timestamp_seconds
+                      })
+
+                      # ==================================================
+                      # Success
+                      # ==================================================
+
+                      metrics.append({
+                          "name":
+                              f"jmeter.{safe_label}.success",
+                          "interval": 1,
+                          "value": success_value,
+                          "time": timestamp_seconds
+                      })
+
+                      # ==================================================
+                      # Latency
+                      # ==================================================
+
+                      metrics.append({
+                          "name":
+                              f"jmeter.{safe_label}.latency",
+                          "interval": 1,
+                          "value": float(latency or 0),
+                          "time": timestamp_seconds
+                      })
+
+                      # ==================================================
+                      # Connect time
+                      # ==================================================
+
+                      metrics.append({
+                          "name":
+                              f"jmeter.{safe_label}.connect_time",
+                          "interval": 1,
+                          "value": float(connect or 0),
+                          "time": timestamp_seconds
+                      })
+
+          except FileNotFoundError:
+
+              print("ERROR: results.jtl was not found.")
+
+              raise SystemExit(1)
+
+          except Exception as e:
+
+              print(
+                  "ERROR: Could not read results.jtl: "
+                  f"{e}"
+              )
+
+              raise SystemExit(1)
+
+          # ======================================================
+          # Validate
+          # ======================================================
+
+          print("========================================")
+
+          print(
+              f"JMeter samples processed: "
+              f"{sample_count}"
+          )
+
+          print(
+              f"Grafana metrics prepared: "
+              f"{len(metrics)}"
+          )
+
+          print("========================================")
+
+          if sample_count == 0:
+
+              print(
+                  "ERROR: No JMeter samples were found."
+              )
+
+              raise SystemExit(1)
+
+          if len(metrics) == 0:
+
+              print(
+                  "ERROR: No Grafana metrics were generated."
+              )
+
+              raise SystemExit(1)
+
+          # ======================================================
+          # Send batches
+          # ======================================================
+
+          batch_size = 500
+          total_sent = 0
+
+          for start in range(
+              0,
+              len(metrics),
+              batch_size
+          ):
+
+              batch = metrics[
+                  start:start + batch_size
+              ]
+
+              payload = json.dumps(
+                  batch
+              ).encode("utf-8")
+
+              request = urllib.request.Request(
+                  GRAFANA_URL,
+                  data=payload,
+                  method="POST"
+              )
+
+              request.add_header(
+                  "Authorization",
+                  "Bearer 3609143:" + GRAFANA_TOKEN
+              )
+
+              request.add_header(
+                  "Content-Type",
+                  "application/json"
+              )
+
+              batch_number = (
+                  start // batch_size
+              ) + 1
+
+              print(
+                  f"Sending Grafana batch "
+                  f"{batch_number}: "
+                  f"{len(batch)} metrics"
+              )
+
+              try:
+
+                  with urllib.request.urlopen(
+                      request,
+                      timeout=30
+                  ) as response:
+
+                      status = response.status
+
+                      response_body = (
+                          response.read()
+                          .decode()
+                      )
+
+                      print(
+                          f"Grafana response: "
+                          f"HTTP {status}"
+                      )
+
+                      if response_body:
+
+                          print(
+                              "Grafana response body: "
+                              f"{response_body}"
+                          )
+
+                      if status < 200 or status >= 300:
+
+                          raise RuntimeError(
+                              f"Grafana returned HTTP {status}"
+                          )
+
+              except urllib.error.HTTPError as e:
+
+                  print(
+                      f"ERROR: Grafana HTTP error "
+                      f"{e.code} {e.reason}"
+                  )
+
+                  try:
+
+                      print(
+                          e.read().decode()
+                      )
+
+                  except Exception:
+
+                      pass
+
+                  raise SystemExit(1)
+
+              except Exception as e:
+
+                  print(
+                      "ERROR sending metrics "
+                      f"to Grafana: {e}"
+                  )
+
+                  raise SystemExit(1)
+
+              total_sent += len(batch)
+
+          # ======================================================
+          # Final result
+          # ======================================================
+
+          print("========================================")
+
+          print(
+              f"JMeter samples processed: "
+              f"{sample_count}"
+          )
+
+          print(
+              f"Grafana metrics sent: "
+              f"{total_sent}"
+          )
+
+          print("========================================")
+
+          print(
+              "Completed JMeter metrics sent "
+              "to Grafana Cloud successfully."
+          )
+
+          PY
+
+
+      # ==========================================================
+      # 13. Upload JMeter results
+      # ==========================================================
+      - name: Upload JMeter results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-results
+          path: |
+            results.jtl
+            jmeter-report
+            graphite-bridge.log
