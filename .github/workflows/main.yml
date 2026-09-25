@@ -8,18 +8,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-	   # ==========================================================
-      # 1. Grafana live dashboard
+
+      # ==========================================================
+      # 0. Grafana live dashboard
       # ==========================================================
       - name: Grafana live dashboard
-	   run: echo "grafana: https://gracefulwillow1732.grafana.net/d/shzmhd2/launch-resp-time?from=now-15m&to=now&timezone=browser&refresh=auto"
+        run: echo "Grafana: https://gracefulwillow1732.grafana.net/d/shzmhd2/launch-resp-time?from=now-15m&to=now&timezone=browser&refresh=auto"
 
       # ==========================================================
       # 1. Checkout repository
       # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
-
 
       # ==========================================================
       # 2. Setup Java 17
@@ -29,7 +29,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-
 
       # ==========================================================
       # 3. Download JMeter 5.6.3
@@ -52,7 +51,6 @@ jobs:
           echo "Checking JMeter version..."
 
           ./apache-jmeter-5.6.3/bin/jmeter --version
-
 
       # ==========================================================
       # 4. Install JMeter Plugins Manager
@@ -85,7 +83,6 @@ jobs:
 
           echo "Plugins Manager installed successfully."
 
-
       # ==========================================================
       # 5. Install Ultimate Thread Group
       # ==========================================================
@@ -101,7 +98,6 @@ jobs:
             install jpgc-casutg
 
           echo "Ultimate Thread Group installed."
-
 
       # ==========================================================
       # 6. Verify JMX file
@@ -119,7 +115,6 @@ jobs:
           ls -lh "View Results Tree.jmx"
 
           echo "JMX file found successfully."
-
 
       # ==========================================================
       # 7. Create Graphite -> Grafana Cloud bridge
@@ -604,7 +599,6 @@ jobs:
 
           echo "Bridge compiled successfully."
 
-
       # ==========================================================
       # 8. Start live Grafana bridge
       # ==========================================================
@@ -636,9 +630,6 @@ jobs:
           echo "========================================"
 
           cat graphite-bridge.log
-		  
-
-
 
       # ==========================================================
       # 9. Verify bridge port
@@ -665,7 +656,6 @@ jobs:
           fi
 
           echo "Graphite bridge is listening on port 2003."
-
 
       # ==========================================================
       # 10. Run JMeter
@@ -704,7 +694,6 @@ jobs:
 
           head -n 5 results.jtl
 
-
       # ==========================================================
       # 11. Stop live bridge
       # ==========================================================
@@ -726,7 +715,6 @@ jobs:
           echo "========================================"
 
           cat graphite-bridge.log || true
-
 
       # ==========================================================
       # 12. Send completed JMeter results to Grafana Cloud
@@ -758,10 +746,6 @@ jobs:
 
           metrics = []
           sample_count = 0
-
-          # ======================================================
-          # Read JMeter CSV JTL
-          # ======================================================
 
           try:
 
@@ -805,10 +789,6 @@ jobs:
 
                       raise SystemExit(1)
 
-                  # ==================================================
-                  # Process samples
-                  # ==================================================
-
                   for row in reader:
 
                       timestamp = row.get("timeStamp")
@@ -824,10 +804,6 @@ jobs:
                       sample_count += 1
 
                       timestamp_seconds = int(timestamp) // 1000
-
-                      # ==================================================
-                      # Graphite-safe label
-                      # ==================================================
 
                       safe_label = "".join(
                           c
@@ -853,10 +829,6 @@ jobs:
                           f"success={success}"
                       )
 
-                      # ==================================================
-                      # Response time
-                      # ==================================================
-
                       metrics.append({
                           "name":
                               f"jmeter.{safe_label}.response_time",
@@ -864,10 +836,6 @@ jobs:
                           "value": float(elapsed or 0),
                           "time": timestamp_seconds
                       })
-
-                      # ==================================================
-                      # Success
-                      # ==================================================
 
                       metrics.append({
                           "name":
@@ -877,10 +845,6 @@ jobs:
                           "time": timestamp_seconds
                       })
 
-                      # ==================================================
-                      # Latency
-                      # ==================================================
-
                       metrics.append({
                           "name":
                               f"jmeter.{safe_label}.latency",
@@ -888,10 +852,6 @@ jobs:
                           "value": float(latency or 0),
                           "time": timestamp_seconds
                       })
-
-                      # ==================================================
-                      # Connect time
-                      # ==================================================
 
                       metrics.append({
                           "name":
@@ -904,7 +864,6 @@ jobs:
           except FileNotFoundError:
 
               print("ERROR: results.jtl was not found.")
-
               raise SystemExit(1)
 
           except Exception as e:
@@ -915,10 +874,6 @@ jobs:
               )
 
               raise SystemExit(1)
-
-          # ======================================================
-          # Validate
-          # ======================================================
 
           print("========================================")
 
@@ -949,10 +904,6 @@ jobs:
               )
 
               raise SystemExit(1)
-
-          # ======================================================
-          # Send batches
-          # ======================================================
 
           batch_size = 500
           total_sent = 0
@@ -1037,13 +988,10 @@ jobs:
                   )
 
                   try:
-
                       print(
                           e.read().decode()
                       )
-
                   except Exception:
-
                       pass
 
                   raise SystemExit(1)
@@ -1058,10 +1006,6 @@ jobs:
                   raise SystemExit(1)
 
               total_sent += len(batch)
-
-          # ======================================================
-          # Final result
-          # ======================================================
 
           print("========================================")
 
@@ -1083,7 +1027,6 @@ jobs:
           )
 
           PY
-
 
       # ==========================================================
       # 13. Upload JMeter results
